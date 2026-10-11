@@ -3,10 +3,57 @@ import os
 import json
 import base64
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 import urllib.request
 import urllib.error
 import streamlit.components.v1 as components
+
+# ----------------------------------------------------
+# 日本標準時 (JST = UTC+9) 定義（クラウドサーバーのUTC時間ズレを完全解消）
+# ----------------------------------------------------
+JST = timezone(timedelta(hours=9), name="JST")
+
+def get_now_jst():
+    """日本時間 (JST) の現在日時 datetime を返す"""
+    return datetime.now(JST)
+
+def get_today_jst():
+    """日本時間 (JST) の今日の日付 date を返す"""
+    return datetime.now(JST).date()
+
+def get_today_str_jst():
+    """日本時間 (JST) の今日の日付文字列 (YYYY-MM-DD) を返す"""
+    return get_today_jst().isoformat()
+
+def get_time_str_jst():
+    """日本時間 (JST) の現在時刻文字列 (HH:MM) を返す"""
+    return get_now_jst().strftime("%H:%M")
+
+def get_datetime_str_jst():
+    """日本時間 (JST) の現在日時文字列 (YYYY-MM-DD HH:MM) を返す"""
+    return get_now_jst().strftime("%Y-%m-%d %H:%M")
+
+def calculate_streak_days(daily_logs):
+    """記録されたカレンダーログから実際の連続継続日数を自動算出"""
+    if not daily_logs:
+        return 1
+    saved_dates = set()
+    for d_str in daily_logs.keys():
+        try:
+            saved_dates.add(date.fromisoformat(d_str))
+        except Exception:
+            pass
+    if not saved_dates:
+        return 1
+    today = get_today_jst()
+    current_check = today if today in saved_dates else today - timedelta(days=1)
+    if current_check not in saved_dates:
+        return max(len(saved_dates), 1)
+    streak = 0
+    while current_check in saved_dates:
+        streak += 1
+        current_check -= timedelta(days=1)
+    return max(streak, 1)
 
 # ページ基本設定
 st.set_page_config(
@@ -171,7 +218,7 @@ if "messages" not in st.session_state:
         {
             "role": "assistant",
             "content": "こんにちは！今日はどんなテーマや悩みについて、一緒に考えを深めていきましょうか？頭の中にあるモヤモヤをそのまま言葉にしてみてくださいね。",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+            "timestamp": get_datetime_str_jst()
         }
     ]
 
@@ -683,7 +730,7 @@ with col_b1:
             {
                 "role": "assistant",
                 "content": "こんにちは！今日はどんなテーマや悩みについて、一緒に考えを深めていきましょうか？頭の中にあるモヤモヤをそのまま言葉にしてみてくださいね。",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+                "timestamp": get_datetime_str_jst()
             }
         ]
         if "just_saved_insights" in st.session_state:
@@ -693,7 +740,7 @@ with col_b1:
 with col_b2:
     # 修正①: 保存ボタンを押した「その時」にのみ知見まとめを生成・表示
     if st.button("📌 この対話をカレンダーに保存", use_container_width=True, disabled=(user_turns == 0)):
-        today_str = date.today().isoformat()
+        today_str = get_today_str_jst()
         if today_str not in st.session_state.daily_logs:
             st.session_state.daily_logs[today_str] = []
         
@@ -711,10 +758,11 @@ with col_b2:
             st.session_state.daily_logs[today_str].append({
                 "title": summary,
                 "turns": user_turns,
-                "time": datetime.now().strftime("%H:%M"),
+                "time": get_time_str_jst(),
                 "insights": insights_summary,
                 "messages": list(st.session_state.messages)
             })
+            st.session_state.streak_days = calculate_streak_days(st.session_state.daily_logs)
 
 with col_b3:
     first_user_msg = next((m["content"] for m in st.session_state.messages if m["role"] == "user"), "対話")
@@ -728,7 +776,7 @@ with col_b3:
     download_text = f"============================================================\n"
     download_text += f"ソクラテス・メンター 〜正解を教えない壁打ちチャット〜 対話記録\n"
     download_text += f"============================================================\n"
-    download_text += f"実施日時: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+    download_text += f"実施日時: {get_datetime_str_jst()} (JST)\n"
     download_text += f"探究テーマ（初期発言）: {topic_title}\n"
     download_text += f"対話往復数: {user_turns} 往復\n"
     download_text += f"著作権表示: 2026 Teraoka-Denshi. All rights reserved.\n"
@@ -754,7 +802,7 @@ with col_b3:
     st.download_button(
         label="📥 対話記録ダウンロード (.txt)",
         data=download_text,
-        file_name=f"socrates_dialogue_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+        file_name=f"socrates_dialogue_{get_now_jst().strftime('%Y%m%d_%H%M')}.txt",
         mime="text/plain",
         use_container_width=True,
         disabled=(user_turns == 0)
@@ -762,7 +810,7 @@ with col_b3:
 
 # 修正①: 保存直後にのみ画面に知見まとめを表示（通常の対話中は出さない）
 if "just_saved_insights" in st.session_state and st.session_state.just_saved_insights:
-    st.success(f"対話概要と得られた知見を {date.today().isoformat()} のカレンダーに保存しました！")
+    st.success(f"対話概要と得られた知見を {get_today_str_jst()} のカレンダーに保存しました！")
     with st.expander("📝 保存された対話の論点整理と得られた知見（クリックで確認）", expanded=True):
         st.markdown(
             f"""
@@ -984,7 +1032,7 @@ with tab_chat:
         st.session_state.messages.append({
             "role": "user",
             "content": prompt,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+            "timestamp": get_datetime_str_jst()
         })
 
         # 寄り添い型ソクラテス応答生成
@@ -1077,7 +1125,7 @@ with tab_chat:
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": reply,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+                "timestamp": get_datetime_str_jst()
             })
             st.rerun()
 
@@ -1101,6 +1149,9 @@ with tab_chat:
 with tab_calendar:
     st.markdown("### 📅 探究カレンダー＆学習継続の記録")
     
+    # ストリーク日数を最新の記録ログから自動再計算
+    st.session_state.streak_days = calculate_streak_days(st.session_state.daily_logs)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric(label="🔥 連続壁打ち日数", value=f"{st.session_state.streak_days} 日間")
@@ -1117,12 +1168,71 @@ with tab_calendar:
         elif total_sessions >= 2: rank_name = "Lv.2 前提の破壊者"
         st.metric(label="🏆 探究者ランク", value=rank_name)
 
-    st.markdown("---")
+    # ----------------------------------------------------
+    # 探究ポートフォリオのファイル保存・バックアップ＆完全復元エリア
+    # ----------------------------------------------------
+    st.markdown(
+        """
+        <div style="background-color: rgba(15, 23, 42, 0.7); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 0.75rem; padding: 0.85rem 1.2rem; margin: 1rem 0;">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                    <strong style="color: #38bdf8; font-size: 0.95rem;">💾 探究データの保存と次回への引き継ぎ（完全再現）</strong>
+                    <p style="font-size: 0.75rem; color: #94a3b8; margin: 0.2rem 0 0 0;">
+                        Streamlitはブラウザを閉じると初期化されますが、以下の機能を使うことで<strong>次にアクセスした際も前回の全カレンダー記録と知見を100%復元</strong>できます。
+                    </p>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    port_col1, port_col2 = st.columns([1, 1])
+
+    with port_col1:
+        export_bundle = {
+            "app": "socrates-mentor",
+            "version": "2.0",
+            "export_time": get_datetime_str_jst(),
+            "streak_days": st.session_state.streak_days,
+            "daily_logs": st.session_state.daily_logs
+        }
+        export_json_str = json.dumps(export_bundle, ensure_ascii=False, indent=2)
+        st.download_button(
+            label="📥 探究ポートフォリオをファイル保存 (.json)",
+            data=export_json_str,
+            file_name=f"socrates_portfolio_{get_now_jst().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="カレンダー記録・知見まとめ・ストリークを含む全データをJSONファイルとして手元のPC/スマホに保存します。"
+        )
+
+    with port_col2:
+        uploaded_portfolio = st.file_uploader(
+            "📂 保存した探究ファイル (.json) を読み込んで復元",
+            type=["json"],
+            label_visibility="collapsed",
+            help="以前保存した探究ポートフォリオ（.json）を選択すると、一瞬で前回のカレンダーと全知見が復元されます。"
+        )
+        if uploaded_portfolio is not None:
+            try:
+                loaded_bundle = json.loads(uploaded_portfolio.read().decode("utf-8"))
+                if "daily_logs" in loaded_bundle:
+                    st.session_state.daily_logs = loaded_bundle["daily_logs"]
+                    st.session_state.streak_days = calculate_streak_days(st.session_state.daily_logs)
+                    st.success(f"✅ 過去の探究記録（{len(st.session_state.daily_logs)}日分）を完全に復元しました！")
+                    st.rerun()
+                else:
+                    st.error("⚠️ 探究ポートフォリオの形式が正しくありません。")
+            except Exception as e:
+                st.error(f"⚠️ ファイルの読み込みに失敗しました: {e}")
+
+    st.markdown("<hr style='border: none; border-top: 1px solid #1e293b; margin: 1rem 0;'>", unsafe_allow_html=True)
 
     cal_col1, cal_col2 = st.columns([1, 1])
 
     with cal_col1:
-        selected_date = st.date_input("確認する日付を選択", value=date.today())
+        selected_date = st.date_input("確認する日付を選択 (日本時間)", value=get_today_jst())
         selected_date_str = selected_date.isoformat()
 
         st.markdown(f"#### 📝 {selected_date_str} の探究ログ一覧")
@@ -1132,7 +1242,7 @@ with tab_calendar:
         else:
             for idx, item in enumerate(logs_today):
                 with st.expander(f"📌 {item.get('time', '')} - {item.get('title', '探究対話')} ({item.get('turns', 0)}往復)"):
-                    st.write(f"**記録時刻:** {item.get('time')}")
+                    st.write(f"**記録時刻 (JST):** {item.get('time')}")
                     st.write(f"**ラリー往復数:** {item.get('turns')} 回")
                     if "insights" in item and item["insights"]:
                         st.markdown("##### 📝 対話の論点整理と得られた知見")
@@ -1154,9 +1264,10 @@ with tab_calendar:
                 st.session_state.daily_logs[selected_date_str].append({
                     "title": note_title,
                     "turns": 1,
-                    "time": datetime.now().strftime("%H:%M"),
+                    "time": get_time_str_jst(),
                     "messages": [{"role": "assistant", "content": f"【振り返りメモ】\n{note_body}"}]
                 })
+                st.session_state.streak_days = calculate_streak_days(st.session_state.daily_logs)
                 st.success("振り返りメモをカレンダーに保存しました！")
                 st.rerun()
             else:
