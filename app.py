@@ -211,41 +211,73 @@ st.markdown("<hr style='border: none; border-top: 1px solid #1e293b; margin: 1.2
 # ----------------------------------------------------
 # 上部：探究・AI設定 & 操作パネル
 # ----------------------------------------------------
-secrets_key = ""
-for k in ["GROQ_API_KEY", "GEMINI_API_KEY", "API_KEY"]:
-    try:
-        secrets_key = st.secrets.get(k, "")
-        if secrets_key:
+# Secrets および 環境変数のスマート自動解析（キーの内容から判別）
+raw_secrets = {}
+try:
+    for k, v in st.secrets.items():
+        if isinstance(v, str):
+            raw_secrets[k] = v.strip().strip("'\"")
+except Exception:
+    pass
+
+for k, v in os.environ.items():
+    if k in ["GROQ_API_KEY", "GEMINI_API_KEY", "API_KEY"] and isinstance(v, str):
+        raw_secrets.setdefault(k, v.strip().strip("'\""))
+
+# 内容（AIza... / gsk_...）に基づく確実な自動判別
+detected_gemini_key = ""
+detected_groq_key = ""
+
+for k, val in raw_secrets.items():
+    if "AIza" in val:
+        detected_gemini_key = val
+    elif val.startswith("gsk_"):
+        detected_groq_key = val
+
+# 変数名からのフォールバック
+if not detected_gemini_key:
+    for k in ["GEMINI_API_KEY", "API_KEY"]:
+        v = raw_secrets.get(k, "")
+        if v and not v.startswith("gsk_"):
+            detected_gemini_key = v
             break
-    except Exception:
-        pass
-if not secrets_key:
-    for k in ["GROQ_API_KEY", "GEMINI_API_KEY", "API_KEY"]:
-        secrets_key = os.getenv(k, "")
-        if secrets_key:
-            break
+
+if not detected_groq_key:
+    v = raw_secrets.get("GROQ_API_KEY", "")
+    if v and v.startswith("gsk_"):
+        detected_groq_key = v
+
+has_gemini = bool(detected_gemini_key)
+has_groq = bool(detected_groq_key)
+has_any_secret = has_gemini or has_groq
 
 col_s1, col_s2, col_s3 = st.columns([1.2, 1.2, 1.1])
 
 with col_s1:
-    if secrets_key:
-        provider_name = "Google Gemini" if secrets_key.startswith("AIza") else "Groq"
+    if has_any_secret:
+        if has_gemini and has_groq:
+            provider_desc = "Gemini & Groq 両方連携済"
+        elif has_gemini:
+            provider_desc = "Google Gemini API 連携済"
+        else:
+            provider_desc = "Groq API 連携済"
+
         st.markdown(
             f"""
             <div style="background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 0.5rem; padding: 0.6rem; font-size: 0.75rem; color: #6ee7b7;">
-                🔒 <strong>Secrets連携中</strong>（{provider_name} APIキー秘匿化済）<br>
-                デプロイ環境から自動適用されています。
+                🔒 <strong>Secrets連携中</strong>（{provider_desc}）<br>
+                APIキーは安全に秘匿化され自動適用されています。
             </div>
             """,
             unsafe_allow_html=True
         )
-        groq_api_key = secrets_key
+        input_manual_key = ""
     else:
-        groq_api_key = st.text_input(
-            "🔑 API Key（Groq または Gemini）",
+        input_manual_key = st.text_input(
+            "🔑 API Key（Gemini または Groq）",
             value="",
             type="password",
-            help="Groq（gsk_...）またはGoogle Gemini（AIza...）の無料キーを入力。未入力時はPC内蔵ローカルLLMが稼働します。"
+            help="Google Gemini（AIza...）またはGroq（gsk_...）のキーを入力してください。未入力時はPC内蔵ローカルLLMが稼働します。"
         )
 
 with col_s2:
@@ -260,19 +292,34 @@ with col_s2:
         "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)"
     ]
 
-    # デフォルトモデル判定: GeminiキーならGemini-1.5-flash、GroqキーならLlama 70B、キーなしならローカル
-    if secrets_key or groq_api_key:
-        active_key = secrets_key or groq_api_key
-        default_model_idx = 0 if active_key.startswith("AIza") else 3
+    # デフォルトモデル決定: Geminiキーがあれば最優先でGemini、GroqキーのみならLlama
+    if has_gemini:
+        default_model_idx = 0
+    elif has_groq:
+        default_model_idx = 3
+    elif input_manual_key.startswith("AIza"):
+        default_model_idx = 0
+    elif input_manual_key.startswith("gsk_"):
+        default_model_idx = 3
     else:
-        default_model_idx = 7
+        default_model_idx = 0  # クラウド運用時はGemini-1.5-flashをデフォルト推奨
 
     model_choice = st.selectbox(
         "🤖 動作エンジン / モデル",
         model_list,
         index=default_model_idx,
-        help="Google Gemini系モデルとGroq系モデルの両方に対応しています。設定されたAPIキーに応じて最適なモデルが自動選択されます。"
+        help="Google Gemini系モデルとGroq系モデルの両方に対応しています。"
     )
+
+def get_active_model_key(selected_model):
+    raw_m = selected_model.split()[0].lower()
+    if "gemini" in raw_m:
+        return detected_gemini_key or (input_manual_key if "AIza" in input_manual_key else "") or detected_groq_key or input_manual_key
+    elif any(x in raw_m for x in ["llama", "gemma", "mixtral"]):
+        return detected_groq_key or (input_manual_key if input_manual_key.startswith("gsk_") else "") or detected_gemini_key or input_manual_key
+    return detected_gemini_key or detected_groq_key or input_manual_key
+
+groq_api_key = get_active_model_key(model_choice)
 
 with col_s3:
     socratic_mode = st.selectbox(
