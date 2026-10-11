@@ -110,7 +110,7 @@ def load_local_model_instance():
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.float32,
+        dtype=torch.float32,
         low_cpu_mem_usage=True
     )
     return tokenizer, model
@@ -119,29 +119,46 @@ def generate_local_model_response(prompt_text, history_messages, mode_text):
     try:
         tokenizer, model = load_local_model_instance()
     except (ImportError, ModuleNotFoundError):
-        return "【ご案内】クラウド・デプロイ環境ではローカル推論ライブラリ（torch/transformers）が未インストールの為、上のモデル選択から「llama-3.3-70b-versatile（Groqクラウド: 推奨）」を選択してご利用ください。"
+        return (
+            "【ご案内】クラウド環境（Streamlit Community Cloud）は共有コンテナのメモリ上限（1GB）制限があるため、"
+            "PC実機内蔵のローカルLLM（PyTorch/Transformers）はローカルPC環境でのみ稼働します。\n\n"
+            "クラウド上では、上のモデル選択から「gemini-1.5-flash（推奨）」または「llama-3.3-70b-versatile」を選択してご利用ください。"
+        )
     except Exception as e:
-        return f"モデルのロード中にエラーが発生しました: {str(e)}"
+        return f"ローカルモデルのロード中にエラーが発生しました: {str(e)}"
     
+    import torch
+
+    mode_hint = {
+        "前提の確認（当たり前や定義を疑う）": "特に前提や言葉の定義を問い直しなさい。",
+        "視点の転換（他者の立場・逆から見る）": "特に異なる他者の立場からの視点を促しなさい。",
+        "根拠の提示（なぜそう言えるのかを突く）": "特にそう考えるに至った体験や根拠を問いなさい。",
+        "未来の予測（もしそれが起きたらどうなるか）": "特にそれが起きた未来の波及効果を問いなさい。",
+        "総合（共感と寄り添い深掘り）": "温かく受け止め、最も探究が深まる核心を問いなさい。"
+    }.get(mode_text, "")
+
     system_instruction = f"""あなたは高校生のための「ソクラテス・メンター」です。
-生徒の悩みや発言に温かく寄り添い、生徒が使った言葉（キーワード）を引用しながら、決して答えを教えずに、思考を深める問いかけを日本語で1つだけ返してください。
+生徒の悩みや発言に温かく寄り添い、生徒が使った言葉（キーワード）を引用しながら、決して答えを教えずに、思考を深める問いかけを日本語で1つだけ返してください。{mode_hint}
 文章は途中で途切れず完結させてください。"""
 
     chat_prompt = [{"role": "system", "content": system_instruction}]
     for m in history_messages[-4:]:
+        if m["role"] == "user" and m["content"] == prompt_text:
+            continue
         chat_prompt.append({"role": m["role"], "content": m["content"]})
     chat_prompt.append({"role": "user", "content": prompt_text})
 
     formatted_text = tokenizer.apply_chat_template(chat_prompt, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer([formatted_text], return_tensors="pt")
     
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=150,
-        temperature=0.7,
-        do_sample=True,
-        repetition_penalty=1.15
-    )
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=150,
+            temperature=0.7,
+            do_sample=True,
+            repetition_penalty=1.15
+        )
     new_tokens = outputs[0][len(inputs.input_ids[0]):]
     reply = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
     return reply
