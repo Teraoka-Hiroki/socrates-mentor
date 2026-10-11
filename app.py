@@ -212,21 +212,28 @@ st.markdown("<hr style='border: none; border-top: 1px solid #1e293b; margin: 1.2
 # 上部：探究・AI設定 & 操作パネル
 # ----------------------------------------------------
 secrets_key = ""
-try:
-    secrets_key = st.secrets.get("GROQ_API_KEY", "")
-except Exception:
-    pass
+for k in ["GROQ_API_KEY", "GEMINI_API_KEY", "API_KEY"]:
+    try:
+        secrets_key = st.secrets.get(k, "")
+        if secrets_key:
+            break
+    except Exception:
+        pass
 if not secrets_key:
-    secrets_key = os.getenv("GROQ_API_KEY", "")
+    for k in ["GROQ_API_KEY", "GEMINI_API_KEY", "API_KEY"]:
+        secrets_key = os.getenv(k, "")
+        if secrets_key:
+            break
 
 col_s1, col_s2, col_s3 = st.columns([1.2, 1.2, 1.1])
 
 with col_s1:
     if secrets_key:
+        provider_name = "Google Gemini" if secrets_key.startswith("AIza") else "Groq"
         st.markdown(
-            """
+            f"""
             <div style="background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 0.5rem; padding: 0.6rem; font-size: 0.75rem; color: #6ee7b7;">
-                🔒 <strong>Secrets連携中</strong>（APIキー秘匿化済）<br>
+                🔒 <strong>Secrets連携中</strong>（{provider_name} APIキー秘匿化済）<br>
                 デプロイ環境から自動適用されています。
             </div>
             """,
@@ -235,26 +242,31 @@ with col_s1:
         groq_api_key = secrets_key
     else:
         groq_api_key = st.text_input(
-            "🔑 Groq API Key（デプロイ時設定用）",
+            "🔑 API Key（Groq または Gemini）",
             value="",
             type="password",
-            help="未入力時はPC内蔵のローカルLLM（Qwen2.5）または思考エンジンが直接稼働します。"
+            help="Groq（gsk_...）またはGoogle Gemini（AIza...）の無料キーを入力。未入力時はPC内蔵ローカルLLMが稼働します。"
         )
 
 with col_s2:
-    # APIキーまたはSecretsが存在する場合はGroq 70B（推奨）を、無ければローカルLLMをデフォルトに
-    default_model_idx = 1 if (secrets_key or groq_api_key) else 0
+    # APIキーまたはSecretsが存在する場合はクラウドモデルを、無ければローカルLLMをデフォルトに
+    if secrets_key or groq_api_key:
+        default_model_idx = 2 if (groq_api_key.startswith("AIza")) else 1
+    else:
+        default_model_idx = 0
+
     model_choice = st.selectbox(
         "🤖 動作エンジン / モデル",
         [
             "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)",
             "llama-3.3-70b-versatile (Groqクラウド: 推奨・最高精度70B)",
+            "gemini-1.5-flash (Google公式: 高速・無料・高安定)",
             "llama-3.1-8b-instant (Groqクラウド: 超高速レスポンス)",
             "gemma2-9b-it (Groqクラウド: Google高知能モデル)",
             "mixtral-8x7b-32768 (Groqクラウド: 長文・多角的視点)"
         ],
         index=default_model_idx,
-        help="デプロイ環境ではGroqクラウドの70Bモデルが自動適用されます。PCローカル実機では内蔵モデル（Qwen2.5）も選択可能です。"
+        help="デプロイ環境ではクラウドモデルが自動適用されます。GroqとGoogle Geminiの両方に対応しています。"
     )
 
 with col_s3:
@@ -317,8 +329,8 @@ def generate_dialogue_insights(messages, key, model):
 （この知見をもとに、次に具体的に調べるべきことや、検証すべき実践的な問い）
 """.strip()
 
-    # Groq APIがある場合
-    if key and "Groq" in model:
+    # クラウドAPI（Groq または Google Gemini）がある場合
+    if key and ("Groq" in model or "Google" in model or "gemini" in model.lower()):
         raw_model = model.split()[0]
         conversation_text = ""
         for m in messages:
@@ -339,8 +351,9 @@ def generate_dialogue_insights(messages, key, model):
             "temperature": 0.5,
             "max_tokens": 2048
         }
+        api_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" if (key.startswith("AIza") or "gemini" in raw_model.lower()) else "https://api.groq.com/openai/v1/chat/completions"
         req = urllib.request.Request(
-            "https://api.groq.com/openai/v1/chat/completions",
+            api_url,
             data=json.dumps(data).encode("utf-8"),
             headers=headers,
             method="POST"
@@ -744,8 +757,8 @@ with tab_chat:
                     st.warning(f"ローカルモデル推論中にエラーが発生したため、内蔵エンジンに切り替えました: {e}")
                     return generate_empathetic_fallback_response(user_input, mode)
 
-            # 2. クラウドGroq API実行モード
-            if key and "Groq" in model:
+            # 2. クラウドAPI（Groq または Google Gemini）実行モード
+            if key and ("Groq" in model or "Google" in model or "gemini" in model.lower()):
                 raw_model = model.split()[0]
                 mode_map = {
                     "前提の確認（当たり前や定義を疑う）": "特にユーザーの発言の背景にある『前提や当たり前の定義』に寄り添い、優しく疑い直す問いを投げなさい。",
@@ -788,8 +801,9 @@ with tab_chat:
                     "temperature": 0.6,
                     "max_tokens": 3072
                 }
+                api_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" if (key.startswith("AIza") or "gemini" in raw_model.lower()) else "https://api.groq.com/openai/v1/chat/completions"
                 req = urllib.request.Request(
-                    "https://api.groq.com/openai/v1/chat/completions",
+                    api_url,
                     data=json.dumps(data).encode("utf-8"),
                     headers=headers,
                     method="POST"
