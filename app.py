@@ -801,7 +801,8 @@ with tab_chat:
     elif groq_api_key:
         status_color = "#22d3ee"
         status_icon = "🟢"
-        status_label = f"Groq クラウドLLM 接続中 ({model_choice.split()[0]})"
+        provider_tag = "Google Gemini" if "gemini" in model_choice.lower() else "Groq"
+        status_label = f"{provider_tag} クラウドLLM 接続中 ({model_choice.split()[0]})"
     else:
         status_color = "#f59e0b"
         status_icon = "🟡"
