@@ -248,12 +248,13 @@ with col_s2:
         "🤖 動作エンジン / モデル",
         [
             "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)",
-            "llama-3.3-70b-versatile (Groqクラウド: 推奨)",
-            "llama-3.1-8b-instant (Groqクラウド: 超高速)",
-            "mixtral-8x7b-32768 (Groqクラウド: 長文対応)"
+            "llama-3.3-70b-versatile (Groqクラウド: 推奨・最高精度70B)",
+            "llama-3.1-8b-instant (Groqクラウド: 超高速レスポンス)",
+            "gemma2-9b-it (Groqクラウド: Google高知能モデル)",
+            "mixtral-8x7b-32768 (Groqクラウド: 長文・多角的視点)"
         ],
         index=default_model_idx,
-        help="Secrets連携時やAPIキー設定時はGroqクラウド（70B）が自動推奨されます。外部通信なしのPC内推論時はローカルLLMを選択してください。"
+        help="デプロイ環境ではGroqクラウドの70Bモデルが自動適用されます。PCローカル実機では内蔵モデル（Qwen2.5）も選択可能です。"
     )
 
 with col_s3:
