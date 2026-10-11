@@ -310,6 +310,79 @@ def extract_core_topic(text):
             meaningful.append(temp)
     return meaningful[0] if meaningful else (phrases[0] if phrases else "そのテーマ")
 
+def call_llm_api(api_key, model_name, messages_history, user_input, system_prompt):
+    raw_model = model_name.split()[0]
+    is_gemini = api_key.startswith("AIza") or "gemini" in raw_model.lower()
+    
+    # 1. Google Gemini公式ネイティブREST API
+    if is_gemini:
+        clean_model = raw_model
+        if "gemini" not in clean_model:
+            clean_model = "gemini-1.5-flash"
+        
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+        
+        contents = []
+        for m in messages_history[-6:]:
+            role = "user" if m["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        if user_input:
+            contents.append({"role": "user", "parts": [{"text": user_input}]})
+            
+        payload = {
+            "contents": contents,
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "generationConfig": {
+                "temperature": 0.6,
+                "maxOutputTokens": 3072
+            }
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
+            candidates = res_json.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text", "").strip()
+            raise Exception("Geminiからの回答が空でした。")
+
+    # 2. Groq Cloud API
+    else:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        messages_payload = [{"role": "system", "content": system_prompt}]
+        for m in messages_history[-8:]:
+            messages_payload.append({"role": m["role"], "content": m["content"]})
+        if user_input:
+            messages_payload.append({"role": "user", "content": user_input})
+            
+        payload = {
+            "model": raw_model,
+            "messages": messages_payload,
+            "temperature": 0.6,
+            "max_tokens": 3072
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
+            return res_json["choices"][0]["message"]["content"].strip()
+
 def generate_dialogue_insights(messages, key, model):
     user_msgs = [m["content"] for m in messages if m["role"] == "user"]
     if not user_msgs:
@@ -334,39 +407,16 @@ def generate_dialogue_insights(messages, key, model):
 （この知見をもとに、次に具体的に調べるべきことや、検証すべき実践的な問い）
 """.strip()
 
-    # クラウドAPI（Groq または Google Gemini）がある場合
+    # クラウドAPI（Gemini または Groq）がある場合
     if key and ("Groq" in model or "Google" in model or "gemini" in model.lower()):
-        raw_model = model.split()[0]
         conversation_text = ""
         for m in messages:
             sender = "生徒" if m["role"] == "user" else "ソクラテス"
             conversation_text += f"{sender}: {m['content']}\n"
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}"
-        }
-        messages_payload = [
-            {"role": "system", "content": summary_system_prompt},
-            {"role": "user", "content": f"以下の対話履歴を分析し、論点整理と得られた知見を文章にまとめてください：\n\n{conversation_text}"}
-        ]
-        data = {
-            "model": raw_model,
-            "messages": messages_payload,
-            "temperature": 0.5,
-            "max_tokens": 2048
-        }
-        api_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" if (key.startswith("AIza") or "gemini" in raw_model.lower()) else "https://api.groq.com/openai/v1/chat/completions"
-        req = urllib.request.Request(
-            api_url,
-            data=json.dumps(data).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
+        user_prompt = f"以下の対話履歴を分析し、論点整理と得られた知見を文章にまとめてください：\n\n{conversation_text}"
         try:
-            with urllib.request.urlopen(req) as resp:
-                res_json = json.loads(resp.read().decode("utf-8"))
-                return res_json["choices"][0]["message"]["content"].strip()
+            return call_llm_api(key, model, [], user_prompt, summary_system_prompt)
         except Exception:
             pass
 
@@ -762,8 +812,12 @@ with tab_chat:
                     st.warning(f"ローカルモデル推論中にエラーが発生したため、内蔵エンジンに切り替えました: {e}")
                     return generate_empathetic_fallback_response(user_input, mode)
 
-            # 2. クラウドAPI（Groq または Google Gemini）実行モード
-            if key and ("Groq" in model or "Google" in model or "gemini" in model.lower()):
+            # 2. クラウドAPI（Google Gemini または Groq）実行モード
+            if "Groq" in model or "Google" in model or "gemini" in model.lower():
+                if not key:
+                    st.warning("⚠️ APIキーが未設定です。画面上の「🔑 API Key」欄にGeminiキー（AIza...）を入力するか、Streamlit CloudのSecretsをご確認ください。")
+                    return generate_empathetic_fallback_response(user_input, mode)
+
                 raw_model = model.split()[0]
                 mode_map = {
                     "前提の確認（当たり前や定義を疑う）": "特にユーザーの発言の背景にある『前提や当たり前の定義』に寄り添い、優しく疑い直す問いを投げなさい。",
@@ -792,35 +846,22 @@ with tab_chat:
 {extra_instruction}
 """.strip()
 
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {key}"
-                }
-                messages_payload = [{"role": "system", "content": system_prompt}]
-                for m in st.session_state.messages[-8:]:
-                    messages_payload.append({"role": m["role"], "content": m["content"]})
-
-                data = {
-                    "model": raw_model,
-                    "messages": messages_payload,
-                    "temperature": 0.6,
-                    "max_tokens": 3072
-                }
-                api_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" if (key.startswith("AIza") or "gemini" in raw_model.lower()) else "https://api.groq.com/openai/v1/chat/completions"
-                req = urllib.request.Request(
-                    api_url,
-                    data=json.dumps(data).encode("utf-8"),
-                    headers=headers,
-                    method="POST"
-                )
                 try:
-                    with urllib.request.urlopen(req) as resp:
-                        res_json = json.loads(resp.read().decode("utf-8"))
-                        return res_json["choices"][0]["message"]["content"].strip()
-                except Exception:
-                    pass
+                    return call_llm_api(key, model, st.session_state.messages, user_input, system_prompt)
+                except urllib.error.HTTPError as e:
+                    err_msg = e.read().decode("utf-8", errors="ignore")
+                    if e.code in [400, 401, 403]:
+                        st.error(f"⚠️ APIキー認証エラー ({e.code}): APIキーが無効であるか、権限がありません。Google AI Studioでキーをご確認ください。\n詳細: {err_msg[:200]}")
+                    elif e.code == 429:
+                        st.error("⚠️ レート制限エラー (429): APIの利用頻度制限に達しました。1分ほど待ってからお試しください。")
+                    else:
+                        st.error(f"⚠️ APIエラー ({e.code}): {err_msg[:200]}")
+                    return generate_empathetic_fallback_response(user_input, mode)
+                except Exception as e:
+                    st.error(f"⚠️ 通信エラー: {str(e)}")
+                    return generate_empathetic_fallback_response(user_input, mode)
 
-            # 3. 内蔵寄り添いエンジン（APIキーなし・ローカルLLM以外のフォールバック）
+            # 3. 内蔵寄り添いエンジン（ローカルLLM以外のフォールバック）
             return generate_empathetic_fallback_response(user_input, mode)
 
         with st.spinner("ソクラテスがあなたの言葉に耳を傾けています..."):
