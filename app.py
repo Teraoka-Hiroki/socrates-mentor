@@ -282,10 +282,10 @@ with col_s1:
 
 with col_s2:
     model_list = [
-        "gemini-2.0-flash (Google公式: 最新高速・推奨)",
-        "gemini-2.5-flash (Google公式: 次世代高機能モデル)",
+        "gemini-1.5-flash (Google公式: 高速・無料・推奨)",
+        "gemini-2.0-flash (Google公式: 次世代最新モデル)",
+        "gemini-1.5-flash-8b (Google公式: 超軽量・低遅延)",
         "gemini-1.5-pro (Google公式: 最深思考・最高精度)",
-        "gemini-1.5-flash (Google公式: 標準モデル)",
         "llama-3.3-70b-versatile (Groqクラウド: 最高精度70B)",
         "llama-3.1-8b-instant (Groqクラウド: 超高速レスポンス)",
         "gemma2-9b-it (Groqクラウド: Google高知能モデル)",
@@ -293,7 +293,7 @@ with col_s2:
         "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)"
     ]
 
-    # デフォルトモデル決定: Geminiキーがあれば最優先でGemini 2.0、GroqキーのみならLlama
+    # デフォルトモデル決定: Geminiキーがあれば最優先でGemini 1.5 Flash、GroqキーのみならLlama
     if has_gemini:
         default_model_idx = 0
     elif has_groq:
@@ -303,7 +303,7 @@ with col_s2:
     elif input_manual_key.startswith("gsk_"):
         default_model_idx = 4
     else:
-        default_model_idx = 0  # クラウド運用時は最新Gemini-2.0-flashをデフォルト推奨
+        default_model_idx = 0  # クラウド運用時はGemini-1.5-flashをデフォルト推奨
 
     model_choice = st.selectbox(
         "🤖 動作エンジン / モデル",
@@ -358,50 +358,114 @@ def extract_core_topic(text):
             meaningful.append(temp)
     return meaningful[0] if meaningful else (phrases[0] if phrases else "そのテーマ")
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_available_gemini_models(api_key):
+    """
+    Google AI Studio APIキーから、現在有効かつ利用可能なモデル一覧（generateContent対応）を取得
+    """
+    if not api_key:
+        return []
+    available = []
+    for ver in ["v1beta", "v1"]:
+        endpoint = f"https://generativelanguage.googleapis.com/{ver}/models?key={api_key}"
+        try:
+            req = urllib.request.Request(endpoint, method="GET")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for m in data.get("models", []):
+                    methods = m.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods:
+                        raw_id = m.get("name", "").replace("models/", "").strip()
+                        if raw_id and (ver, raw_id) not in available:
+                            available.append((ver, raw_id))
+        except Exception:
+            continue
+    return available
+
+def build_gemini_contents(messages_history, user_input):
+    """
+    Gemini APIの仕様に100%厳格に準拠したcontents配列を構築する。
+    - ロールは 'user' または 'model' のみ
+    - 先頭は必ず 'user'
+    - 'user' と 'model' が厳格に交互
+    - 末尾は必ず最新の 'user' 発言
+    """
+    raw_turns = []
+    for m in messages_history[-10:]:
+        role = "user" if m.get("role") == "user" else "model"
+        text = m.get("content", "").strip()
+        if text:
+            raw_turns.append({"role": role, "text": text})
+
+    cleaned_input = (user_input or "").strip()
+    if cleaned_input:
+        if not raw_turns or raw_turns[-1]["role"] != "user" or raw_turns[-1]["text"] != cleaned_input:
+            raw_turns.append({"role": "user", "text": cleaned_input})
+
+    # 先頭が model の場合は取り除く（最初の歓迎挨拶などを除外）
+    while raw_turns and raw_turns[0]["role"] != "user":
+        raw_turns.pop(0)
+
+    if not raw_turns:
+        raw_turns.append({"role": "user", "text": cleaned_input if cleaned_input else "こんにちは"})
+
+    # 同一ロールの連続を結合して交互シーケンスを保証
+    merged = []
+    for turn in raw_turns:
+        if not merged:
+            merged.append(turn)
+        elif merged[-1]["role"] == turn["role"]:
+            merged[-1]["text"] += "\n" + turn["text"]
+        else:
+            merged.append(turn)
+
+    return [{"role": item["role"], "parts": [{"text": item["text"]}]} for item in merged]
+
 def call_llm_api(api_key, model_name, messages_history, user_input, system_prompt):
     raw_model = model_name.split()[0]
     is_gemini = api_key.startswith("AIza") or "gemini" in raw_model.lower()
     
     # 1. Google Gemini公式ネイティブREST API
     if is_gemini:
-        # 試行するモデル候補（選択されたモデルを優先し、404時は最新世代へ自動フォールバック）
-        candidate_models = [raw_model]
-        for m_name in ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-pro"]:
-            if m_name not in candidate_models:
-                candidate_models.append(m_name)
+        # 動的に利用可能モデルを検出
+        dynamic_models = get_available_gemini_models(api_key)
         
-        # Gemini API の必須仕様:
-        # ① 先頭は必ず "user" でなければならない（最初の挨拶 model はスキップ）
-        # ② "user" と "model" が厳格に交互でなければならない（同一ロールの連続は禁止）
-        contents = []
-        for m in messages_history[-10:]:
-            role = "user" if m["role"] == "user" else "model"
-            text = m.get("content", "").strip()
-            if not text:
-                continue
-            if not contents:
-                if role == "user":
-                    contents.append({"role": "user", "parts": [{"text": text}]})
-            else:
-                if contents[-1]["role"] == role:
-                    contents[-1]["parts"][0]["text"] += "\n" + text
-                else:
-                    contents.append({"role": role, "parts": [{"text": text}]})
+        # 試行候補の選定
+        trials = []
+        clean_selected = raw_model.lower().replace("models/", "").strip()
+        
+        # 画面選択モデルに合致するものを最優先
+        for ver, mid in dynamic_models:
+            if clean_selected in mid.lower():
+                trials.append((ver, mid))
+                
+        # flash 系モデルを優先追加
+        for ver, mid in dynamic_models:
+            if "flash" in mid.lower() and (ver, mid) not in trials:
+                trials.append((ver, mid))
+                
+        # 残りの動的モデルを追加
+        for ver, mid in dynamic_models:
+            if (ver, mid) not in trials:
+                trials.append((ver, mid))
+                
+        # 動的検出が取得できなかった場合の静的フォールバック
+        static_fallbacks = [
+            ("v1beta", "gemini-1.5-flash"),
+            ("v1beta", "gemini-2.0-flash"),
+            ("v1beta", "gemini-1.5-flash-8b"),
+            ("v1beta", "gemini-1.5-pro"),
+            ("v1", "gemini-1.5-flash"),
+            ("v1", "gemini-pro"),
+        ]
+        for item in static_fallbacks:
+            if item not in trials:
+                trials.append(item)
 
-        # user_inputの追加（末尾がすでに同一発言でなければ追加）
-        if user_input:
-            if not contents:
-                contents.append({"role": "user", "parts": [{"text": user_input}]})
-            elif contents[-1]["role"] == "user":
-                if contents[-1]["parts"][0]["text"] != user_input:
-                    contents[-1]["parts"][0]["text"] += "\n" + user_input
-            else:
-                contents.append({"role": role, "parts": [{"text": user_input}]})
-
-        if not contents:
-            contents.append({"role": "user", "parts": [{"text": "こんにちは"}]})
-            
-        payload = {
+        contents = build_gemini_contents(messages_history, user_input)
+        
+        # ① systemInstruction あり（v1beta標準）
+        payload_sys = {
             "contents": contents,
             "systemInstruction": {
                 "parts": [{"text": system_prompt}]
@@ -411,37 +475,64 @@ def call_llm_api(api_key, model_name, messages_history, user_input, system_promp
                 "maxOutputTokens": 3072
             }
         }
+        # ② systemInstruction 代替（先頭userに埋め込み：v1や一部モデル対応）
+        contents_alt = [dict(c) for c in contents]
+        if contents_alt:
+            orig_text = contents_alt[0]["parts"][0]["text"]
+            contents_alt[0] = {
+                "role": "user",
+                "parts": [{"text": f"【システム指示】\n{system_prompt}\n\n{orig_text}"}]
+            }
+        payload_alt = {
+            "contents": contents_alt,
+            "generationConfig": {
+                "temperature": 0.6,
+                "maxOutputTokens": 3072
+            }
+        }
 
         last_err = None
-        for current_model in candidate_models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={api_key}"
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    res_json = json.loads(resp.read().decode("utf-8"))
-                    candidates = res_json.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts:
-                            return parts[0].get("text", "").strip()
-            except urllib.error.HTTPError as e:
-                last_err = e
-                if e.code == 404:
-                    continue  # そのモデル名がリタイア済みの場合は次の候補へ！
-                else:
-                    raise e
-            except Exception as e:
-                last_err = e
-                break
+        attempted_info = []
+
+        for ver, mid in trials:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{mid}:generateContent?key={api_key}"
+            
+            # systemInstruction ありと代替の順に試行
+            for p_load in [payload_sys, payload_alt]:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(p_load).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        res_json = json.loads(resp.read().decode("utf-8"))
+                        candidates = res_json.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                reply_text = parts[0].get("text", "").strip()
+                                if reply_text:
+                                    st.session_state["active_engine_name"] = f"Google Gemini ({mid})"
+                                    return reply_text
+                except urllib.error.HTTPError as e:
+                    last_err = e
+                    attempted_info.append(f"{mid}({e.code})")
+                    if e.code == 404:
+                        break  # このバージョン/モデル名は存在しないので次のモデルへ
+                    elif e.code == 400 and p_load is payload_sys:
+                        continue  # systemInstruction非対応の可能性があるため代替payloadを試す
+                    else:
+                        break
+                except Exception as e:
+                    last_err = e
+                    attempted_info.append(f"{mid}(err)")
+                    break
 
         if last_err:
             raise last_err
-        raise Exception("Geminiからの回答が空でした。")
+        raise Exception(f"Geminiからの回答が空でした。(試行: {', '.join(attempted_info[:5])})")
 
     # 2. Groq Cloud API
     else:
@@ -819,8 +910,12 @@ with tab_chat:
     elif groq_api_key:
         status_color = "#22d3ee"
         status_icon = "🟢"
-        provider_tag = "Google Gemini" if "gemini" in model_choice.lower() else "Groq"
-        status_label = f"{provider_tag} クラウドLLM 接続中 ({model_choice.split()[0]})"
+        active_label = st.session_state.get("active_engine_name")
+        if active_label:
+            status_label = f"{active_label} 稼働中"
+        else:
+            provider_tag = "Google Gemini" if "gemini" in model_choice.lower() else "Groq"
+            status_label = f"{provider_tag} クラウドLLM 接続中 ({model_choice.split()[0]})"
     else:
         status_color = "#f59e0b"
         status_icon = "🟡"
