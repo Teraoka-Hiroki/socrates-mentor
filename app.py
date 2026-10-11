@@ -282,9 +282,10 @@ with col_s1:
 
 with col_s2:
     model_list = [
-        "gemini-1.5-flash (Google公式: 高速・無料・推奨)",
+        "gemini-2.0-flash (Google公式: 最新高速・推奨)",
+        "gemini-2.5-flash (Google公式: 次世代高機能モデル)",
         "gemini-1.5-pro (Google公式: 最深思考・最高精度)",
-        "gemini-2.0-flash (Google公式: 次世代最新モデル)",
+        "gemini-1.5-flash (Google公式: 標準モデル)",
         "llama-3.3-70b-versatile (Groqクラウド: 最高精度70B)",
         "llama-3.1-8b-instant (Groqクラウド: 超高速レスポンス)",
         "gemma2-9b-it (Groqクラウド: Google高知能モデル)",
@@ -292,17 +293,17 @@ with col_s2:
         "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)"
     ]
 
-    # デフォルトモデル決定: Geminiキーがあれば最優先でGemini、GroqキーのみならLlama
+    # デフォルトモデル決定: Geminiキーがあれば最優先でGemini 2.0、GroqキーのみならLlama
     if has_gemini:
         default_model_idx = 0
     elif has_groq:
-        default_model_idx = 3
+        default_model_idx = 4
     elif input_manual_key.startswith("AIza"):
         default_model_idx = 0
     elif input_manual_key.startswith("gsk_"):
-        default_model_idx = 3
+        default_model_idx = 4
     else:
-        default_model_idx = 0  # クラウド運用時はGemini-1.5-flashをデフォルト推奨
+        default_model_idx = 0  # クラウド運用時は最新Gemini-2.0-flashをデフォルト推奨
 
     model_choice = st.selectbox(
         "🤖 動作エンジン / モデル",
@@ -363,11 +364,11 @@ def call_llm_api(api_key, model_name, messages_history, user_input, system_promp
     
     # 1. Google Gemini公式ネイティブREST API
     if is_gemini:
-        clean_model = raw_model
-        if "gemini" not in clean_model:
-            clean_model = "gemini-1.5-flash"
-        
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+        # 試行するモデル候補（選択されたモデルを優先し、404時は最新世代へ自動フォールバック）
+        candidate_models = [raw_model]
+        for m_name in ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-pro"]:
+            if m_name not in candidate_models:
+                candidate_models.append(m_name)
         
         # Gemini API の必須仕様:
         # ① 先頭は必ず "user" でなければならない（最初の挨拶 model はスキップ）
@@ -395,7 +396,7 @@ def call_llm_api(api_key, model_name, messages_history, user_input, system_promp
                 if contents[-1]["parts"][0]["text"] != user_input:
                     contents[-1]["parts"][0]["text"] += "\n" + user_input
             else:
-                contents.append({"role": "user", "parts": [{"text": user_input}]})
+                contents.append({"role": role, "parts": [{"text": user_input}]})
 
         if not contents:
             contents.append({"role": "user", "parts": [{"text": "こんにちは"}]})
@@ -410,20 +411,37 @@ def call_llm_api(api_key, model_name, messages_history, user_input, system_promp
                 "maxOutputTokens": 3072
             }
         }
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            res_json = json.loads(resp.read().decode("utf-8"))
-            candidates = res_json.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", "").strip()
-            raise Exception("Geminiからの回答が空でした。")
+
+        last_err = None
+        for current_model in candidate_models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={api_key}"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    res_json = json.loads(resp.read().decode("utf-8"))
+                    candidates = res_json.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", "").strip()
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code == 404:
+                    continue  # そのモデル名がリタイア済みの場合は次の候補へ！
+                else:
+                    raise e
+            except Exception as e:
+                last_err = e
+                break
+
+        if last_err:
+            raise last_err
+        raise Exception("Geminiからの回答が空でした。")
 
     # 2. Groq Cloud API
     else:
