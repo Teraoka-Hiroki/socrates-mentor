@@ -369,12 +369,36 @@ def call_llm_api(api_key, model_name, messages_history, user_input, system_promp
         
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
         
+        # Gemini API の必須仕様:
+        # ① 先頭は必ず "user" でなければならない（最初の挨拶 model はスキップ）
+        # ② "user" と "model" が厳格に交互でなければならない（同一ロールの連続は禁止）
         contents = []
-        for m in messages_history[-6:]:
+        for m in messages_history[-10:]:
             role = "user" if m["role"] == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": m["content"]}]})
+            text = m.get("content", "").strip()
+            if not text:
+                continue
+            if not contents:
+                if role == "user":
+                    contents.append({"role": "user", "parts": [{"text": text}]})
+            else:
+                if contents[-1]["role"] == role:
+                    contents[-1]["parts"][0]["text"] += "\n" + text
+                else:
+                    contents.append({"role": role, "parts": [{"text": text}]})
+
+        # user_inputの追加（末尾がすでに同一発言でなければ追加）
         if user_input:
-            contents.append({"role": "user", "parts": [{"text": user_input}]})
+            if not contents:
+                contents.append({"role": "user", "parts": [{"text": user_input}]})
+            elif contents[-1]["role"] == "user":
+                if contents[-1]["parts"][0]["text"] != user_input:
+                    contents[-1]["parts"][0]["text"] += "\n" + user_input
+            else:
+                contents.append({"role": "user", "parts": [{"text": user_input}]})
+
+        if not contents:
+            contents.append({"role": "user", "parts": [{"text": "こんにちは"}]})
             
         payload = {
             "contents": contents,
@@ -405,9 +429,9 @@ def call_llm_api(api_key, model_name, messages_history, user_input, system_promp
     else:
         url = "https://api.groq.com/openai/v1/chat/completions"
         messages_payload = [{"role": "system", "content": system_prompt}]
-        for m in messages_history[-8:]:
+        for m in messages_history[-10:]:
             messages_payload.append({"role": m["role"], "content": m["content"]})
-        if user_input:
+        if user_input and (not messages_history or messages_history[-1].get("content") != user_input):
             messages_payload.append({"role": "user", "content": user_input})
             
         payload = {
@@ -798,6 +822,9 @@ with tab_chat:
         unsafe_allow_html=True
     )
 
+    if st.session_state.get("last_api_error"):
+        st.error(f"⚠️ {st.session_state.last_api_error}")
+
     # ----------------------------------------------------
     # 入力フォームを「最上部」に配置
     # ----------------------------------------------------
@@ -894,18 +921,20 @@ with tab_chat:
 """.strip()
 
                 try:
-                    return call_llm_api(key, model, st.session_state.messages, user_input, system_prompt)
+                    res = call_llm_api(key, model, st.session_state.messages, user_input, system_prompt)
+                    st.session_state.last_api_error = ""
+                    return res
                 except urllib.error.HTTPError as e:
                     err_msg = e.read().decode("utf-8", errors="ignore")
                     if e.code in [400, 401, 403]:
-                        st.error(f"⚠️ APIキー認証エラー ({e.code}): APIキーが無効であるか、権限がありません。Google AI Studioでキーをご確認ください。\n詳細: {err_msg[:200]}")
+                        st.session_state.last_api_error = f"APIキー認証エラー ({e.code}): キーが無効か権限がありません。Google AI Studioでキーをご確認ください。\n詳細: {err_msg[:200]}"
                     elif e.code == 429:
-                        st.error("⚠️ レート制限エラー (429): APIの利用頻度制限に達しました。1分ほど待ってからお試しください。")
+                        st.session_state.last_api_error = "レート制限エラー (429): APIの利用頻度制限に達しました。1分ほど待ってからお試しください。"
                     else:
-                        st.error(f"⚠️ APIエラー ({e.code}): {err_msg[:200]}")
+                        st.session_state.last_api_error = f"APIエラー ({e.code}): {err_msg[:200]}"
                     return generate_empathetic_fallback_response(user_input, mode)
                 except Exception as e:
-                    st.error(f"⚠️ 通信エラー: {str(e)}")
+                    st.session_state.last_api_error = f"通信エラー: {str(e)}"
                     return generate_empathetic_fallback_response(user_input, mode)
 
             # 3. 内蔵寄り添いエンジン（ローカルLLM以外のフォールバック）
