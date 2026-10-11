@@ -1215,33 +1215,98 @@ with tab_calendar:
             help="以前保存した探究ポートフォリオ（.json）を選択すると、一瞬で前回のカレンダーと全知見が復元されます。"
         )
         if uploaded_portfolio is not None:
-            try:
-                loaded_bundle = json.loads(uploaded_portfolio.read().decode("utf-8"))
-                if "daily_logs" in loaded_bundle:
-                    st.session_state.daily_logs = loaded_bundle["daily_logs"]
-                    st.session_state.streak_days = calculate_streak_days(st.session_state.daily_logs)
-                    st.success(f"✅ 過去の探究記録（{len(st.session_state.daily_logs)}日分）を完全に復元しました！")
-                    st.rerun()
-                else:
-                    st.error("⚠️ 探究ポートフォリオの形式が正しくありません。")
-            except Exception as e:
-                st.error(f"⚠️ ファイルの読み込みに失敗しました: {e}")
+            file_key = f"imported_{uploaded_portfolio.name}_{uploaded_portfolio.size}"
+            if st.session_state.get("last_imported_file") != file_key:
+                try:
+                    file_content = uploaded_portfolio.getvalue().decode("utf-8")
+                    loaded_bundle = json.loads(file_content)
+                    if "daily_logs" in loaded_bundle and isinstance(loaded_bundle["daily_logs"], dict):
+                        imported_logs = loaded_bundle["daily_logs"]
+                        for d_key, items in imported_logs.items():
+                            if d_key not in st.session_state.daily_logs:
+                                st.session_state.daily_logs[d_key] = []
+                            for it in items:
+                                if it not in st.session_state.daily_logs[d_key]:
+                                    st.session_state.daily_logs[d_key].append(it)
+                        
+                        st.session_state.streak_days = calculate_streak_days(st.session_state.daily_logs)
+                        st.session_state["last_imported_file"] = file_key
+                        
+                        # インポートされたログのうち最も新しい日付に自動フォーカス
+                        all_d = sorted(list(st.session_state.daily_logs.keys()), reverse=True)
+                        if all_d:
+                            st.session_state["cal_view_date_str"] = all_d[0]
+
+                        total_restored = sum(len(v) for v in st.session_state.daily_logs.values())
+                        st.success(f"✅ 探究記録（累計 {len(st.session_state.daily_logs)}日分 / {total_restored}件のセッション）を完全復元しました！")
+                        st.rerun()
+                    else:
+                        st.error("⚠️ 探究ポートフォリオの形式が正しくありません。")
+                except Exception as e:
+                    st.error(f"⚠️ ファイルの読み込みに失敗しました: {e}")
 
     st.markdown("<hr style='border: none; border-top: 1px solid #1e293b; margin: 1rem 0;'>", unsafe_allow_html=True)
+
+    # 記録が存在する全日付リスト
+    existing_dates = sorted(list(st.session_state.daily_logs.keys()), reverse=True)
+    today_jst = get_today_jst()
+
+    # 表示する日付の初期決定
+    if "cal_view_date_str" in st.session_state:
+        try:
+            default_selected_date = date.fromisoformat(st.session_state["cal_view_date_str"])
+        except Exception:
+            default_selected_date = today_jst
+    elif today_jst.isoformat() in existing_dates:
+        default_selected_date = today_jst
+    elif existing_dates:
+        try:
+            default_selected_date = date.fromisoformat(existing_dates[0])
+        except Exception:
+            default_selected_date = today_jst
+    else:
+        default_selected_date = today_jst
 
     cal_col1, cal_col2 = st.columns([1, 1])
 
     with cal_col1:
-        selected_date = st.date_input("確認する日付を選択 (日本時間)", value=get_today_jst())
-        selected_date_str = selected_date.isoformat()
+        if existing_dates:
+            date_choices = list(existing_dates)
+            if today_jst.isoformat() not in date_choices:
+                date_choices.insert(0, today_jst.isoformat())
+            
+            def format_date_label(d_str):
+                cnt = len(st.session_state.daily_logs.get(d_str, []))
+                label = f"📅 {d_str} ({cnt}件の記録)"
+                if d_str == today_jst.isoformat():
+                    label += " ★今日"
+                return label
+
+            current_def_str = default_selected_date.isoformat()
+            choice_idx = date_choices.index(current_def_str) if current_def_str in date_choices else 0
+
+            selected_date_str = st.selectbox(
+                "📅 確認する日付を選択:",
+                date_choices,
+                index=choice_idx,
+                format_func=format_date_label,
+                key="select_calendar_date_picker"
+            )
+            selected_date = date.fromisoformat(selected_date_str)
+            st.session_state["cal_view_date_str"] = selected_date_str
+        else:
+            selected_date = st.date_input("確認する日付を選択 (日本時間)", value=default_selected_date)
+            selected_date_str = selected_date.isoformat()
 
         st.markdown(f"#### 📝 {selected_date_str} の探究ログ一覧")
         logs_today = st.session_state.daily_logs.get(selected_date_str, [])
         if not logs_today:
-            st.info("この日の記録はまだありません。チャットを行って「カレンダーに保存」を押すとここに記録されます。")
+            st.info(f"{selected_date_str} の記録はまだありません。チャットを行って「カレンダーに保存」を押すとここに記録されます。")
+            if existing_dates:
+                st.warning(f"💡 他の日付（{', '.join(existing_dates)}）に記録が保存されています！上の日付選択から切り替えてご確認ください。")
         else:
             for idx, item in enumerate(logs_today):
-                with st.expander(f"📌 {item.get('time', '')} - {item.get('title', '探究対話')} ({item.get('turns', 0)}往復)"):
+                with st.expander(f"📌 {item.get('time', '')} - {item.get('title', '探究対話')} ({item.get('turns', 0)}往復)", expanded=True):
                     st.write(f"**記録時刻 (JST):** {item.get('time')}")
                     st.write(f"**ラリー往復数:** {item.get('turns')} 回")
                     if "insights" in item and item["insights"]:
@@ -1272,6 +1337,18 @@ with tab_calendar:
                 st.rerun()
             else:
                 st.warning("タイトルを入力してください。")
+
+    # 全期間の探究履歴一覧（日付に関係なくいつでも確認できるタイムライン）
+    if existing_dates:
+        st.markdown("<hr style='border: none; border-top: 1px solid #1e293b; margin: 1.5rem 0 1rem 0;'>", unsafe_allow_html=True)
+        with st.expander(f"📚 すべての探究ログをタイムラインで一括確認（累計 {total_sessions} 件のセッション）", expanded=False):
+            for d in existing_dates:
+                st.markdown(f"##### 📆 日付: **{d}**")
+                for s_idx, session_item in enumerate(st.session_state.daily_logs[d]):
+                    with st.container():
+                        st.markdown(f"- **{session_item.get('time', '')}** ｜ **{session_item.get('title', '対話')}** ({session_item.get('turns', 0)}往復)")
+                        if session_item.get("insights"):
+                            st.caption(session_item.get("insights")[:200] + ("..." if len(session_item.get("insights", "")) > 200 else ""))
 
 # ====================================================
 # タブ 3: LLMのアルゴリズム解説 (条件① & ➁)
