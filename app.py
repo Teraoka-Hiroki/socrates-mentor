@@ -249,24 +249,29 @@ with col_s1:
         )
 
 with col_s2:
-    # APIキーまたはSecretsが存在する場合はクラウドモデルを、無ければローカルLLMをデフォルトに
+    model_list = [
+        "gemini-1.5-flash (Google公式: 高速・無料・推奨)",
+        "gemini-1.5-pro (Google公式: 最深思考・最高精度)",
+        "gemini-2.0-flash (Google公式: 次世代最新モデル)",
+        "llama-3.3-70b-versatile (Groqクラウド: 最高精度70B)",
+        "llama-3.1-8b-instant (Groqクラウド: 超高速レスポンス)",
+        "gemma2-9b-it (Groqクラウド: Google高知能モデル)",
+        "mixtral-8x7b-32768 (Groqクラウド: 長文・多角的視点)",
+        "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)"
+    ]
+
+    # デフォルトモデル判定: GeminiキーならGemini-1.5-flash、GroqキーならLlama 70B、キーなしならローカル
     if secrets_key or groq_api_key:
-        default_model_idx = 2 if (groq_api_key.startswith("AIza")) else 1
+        active_key = secrets_key or groq_api_key
+        default_model_idx = 0 if active_key.startswith("AIza") else 3
     else:
-        default_model_idx = 0
+        default_model_idx = 7
 
     model_choice = st.selectbox(
         "🤖 動作エンジン / モデル",
-        [
-            "🖥️ ローカルLLM (Qwen2.5-0.5B: PC内実機稼働)",
-            "llama-3.3-70b-versatile (Groqクラウド: 推奨・最高精度70B)",
-            "gemini-1.5-flash (Google公式: 高速・無料・高安定)",
-            "llama-3.1-8b-instant (Groqクラウド: 超高速レスポンス)",
-            "gemma2-9b-it (Groqクラウド: Google高知能モデル)",
-            "mixtral-8x7b-32768 (Groqクラウド: 長文・多角的視点)"
-        ],
+        model_list,
         index=default_model_idx,
-        help="デプロイ環境ではクラウドモデルが自動適用されます。GroqとGoogle Geminiの両方に対応しています。"
+        help="Google Gemini系モデルとGroq系モデルの両方に対応しています。設定されたAPIキーに応じて最適なモデルが自動選択されます。"
     )
 
 with col_s3:
